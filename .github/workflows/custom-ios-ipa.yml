@@ -17,11 +17,17 @@ on:
 permissions:
   contents: read
 
+# A newer push supersedes a queued/older IPA build (each one is a ~40-min
+# macOS job; only the latest commit's artifact matters).
+concurrency:
+  group: custom-ios-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    # macos-15 is the standard public runner; macos-26 queued indefinitely on
-    # this fork. Xcode 16.4 there still builds this Expo/RN app.
-    runs-on: macos-15
+    # Xcode 27 toolchain (Swift 6.2+): macos-15's Xcode 16.4/Swift 6.1 cannot
+    # build the ExpoModulesJSI SwiftPM package (tools version 6.2).
+    runs-on: xcode-27
     timeout-minutes: 120
     env:
       CI: '1'
@@ -101,8 +107,8 @@ jobs:
           python3 - "$BUNDLE" <<'PY'
           import sys
           data = open(sys.argv[1], 'rb').read()
-          needle = '攀岩'.encode('utf-16-le')
-          count = data.count(needle)
+          name = '攀岩'
+          count = data.count(name.encode('utf-16-le')) + data.count(name.encode('utf-8'))
           print(f'local-board name occurrences: {count}')
           if count == 0:
               raise SystemExit('tb-board local protocol is not in the bundle')
@@ -112,8 +118,9 @@ jobs:
         working-directory: packages/mobile
         run: |
           set -euo pipefail
-          APP="ios/build/Boardsesh.xcarchive/Products/Applications/Boardsesh.app"
-          test -d "$APP"
+          APP="$(find ios/build/Boardsesh.xcarchive/Products/Applications -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP"
+          echo "app: $APP"
           rm -rf ios/build/ipa
           mkdir -p ios/build/ipa/Payload
           cp -R "$APP" ios/build/ipa/Payload/
