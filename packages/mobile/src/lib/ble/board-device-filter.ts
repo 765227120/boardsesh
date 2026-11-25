@@ -4,7 +4,7 @@ import {
   REDBEARLAB_SERVICE_UUID,
   parseSerialNumber,
 } from '@boardsesh/ble-protocol';
-import { parseBoardTypeFromDeviceName } from '@boardsesh/ble-protocol/aurora';
+import { isLocalBoardName, parseBoardTypeFromDeviceName } from '@boardsesh/ble-protocol/aurora';
 import { isMoonboardDeviceName } from '@boardsesh/ble-protocol/moonboard';
 import { isWoodsDeviceName } from '@boardsesh/ble-protocol/woods';
 import type { BoardScanFamily } from './types';
@@ -53,6 +53,7 @@ export function isLikelyBoardDevice({
   scanFamily: BoardScanFamily;
 }): boolean {
   if (scanFamily === 'aurora') {
+    if (isLocalBoardName(name)) return true;
     // `undefined` serviceUuids only occur on old iOS binaries whose native scan
     // already filtered by the Aurora service UUID — the native side vouched for
     // the device, so trust it. RNBleAdapter always passes an array (possibly

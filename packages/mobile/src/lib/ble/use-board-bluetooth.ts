@@ -5,8 +5,10 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import {
   getAuroraBluetoothPacket,
   isKilterBuiltBox,
+  isLocalBoardName,
   parseApiLevel,
   parseSerialNumber,
+  setLocalBoardMode,
   type LedColorOverrides,
 } from '@boardsesh/ble-protocol/aurora';
 import { parseAnyBoardTypeFromDeviceName } from '@boardsesh/ble-protocol';
@@ -365,6 +367,8 @@ function adapterOptionsForBoard(boardName: string): BleAdapterOptions {
 // id, as a MoonBoard is. A bare name of another board type is positively
 // another board and is never remembered for this one.
 function isSerialLessBoxOfBoard(deviceName: string | undefined, boardName: string): boolean {
+  // The tb-board ("攀岩板-xx") is a serial-less, board-name-less NUS controller.
+  if (isLocalBoardName(deviceName)) return true;
   return isKilterBuiltBox(deviceName) && parseAnyBoardTypeFromDeviceName(deviceName) === boardName;
 }
 
@@ -1317,6 +1321,7 @@ export function useBoardBluetooth({
       adapterRef.current = null;
       configuredDeviceNameRef.current = undefined;
       configuredDeviceIdRef.current = undefined;
+      setLocalBoardMode(false);
       connectedConfigIdentityRef.current = null;
       hangUpKeepsBoardRef.current = null;
       backgroundAdoptSendGateRef.current = false;
@@ -2059,6 +2064,7 @@ export function useBoardBluetooth({
         apiLevelRef.current = parseApiLevel(connection.deviceName);
         configuredDeviceNameRef.current = connection.deviceName;
         configuredDeviceIdRef.current = connection.deviceId;
+        setLocalBoardMode(isLocalBoardName(connection.deviceName));
 
         const connectionGeneration = nextConnectionGenerationRef.current + 1;
         nextConnectionGenerationRef.current = connectionGeneration;
@@ -2554,6 +2560,7 @@ export function useBoardBluetooth({
       adapterRef.current = null;
       configuredDeviceNameRef.current = undefined;
       configuredDeviceIdRef.current = undefined;
+      setLocalBoardMode(false);
       connectedConfigIdentityRef.current = null;
       hangUpKeepsBoardRef.current = null;
       // Same reason as clearConnectionAfterDrop: a seed set by this generation
@@ -2747,6 +2754,7 @@ export function useBoardBluetooth({
       apiLevelRef.current = parseApiLevel(deviceName);
       configuredDeviceNameRef.current = deviceName;
       configuredDeviceIdRef.current = deviceId;
+      setLocalBoardMode(isLocalBoardName(deviceName));
       const connectionGeneration = nextConnectionGenerationRef.current + 1;
       nextConnectionGenerationRef.current = connectionGeneration;
       adapterRef.current = adapter;

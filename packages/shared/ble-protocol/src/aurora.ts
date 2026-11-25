@@ -239,6 +239,151 @@ export type BluetoothPacketResult = {
   ledsWithColour: number;
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Local board mode — "攀岩板-xx" custom NUS protocol
+//
+// The boardsesh app talks Aurora (SOH/LEN/CHK/STX…). The tb-board firmware on
+// the same Nordic-UART service speaks a simpler protocol:
+//   0xAA | LEN_HI | LEN_LO | CMD | PAYLOAD | XOR(SOF..PAYLOAD)
+// Commands used here: 0x01 brightness, 0x10 clear, 0x15 role colour,
+// 0x16 role-big (u16 count + [role, idx_hi, idx_lo]…).
+// When the connected device name starts with LOCAL_BOARD_NAME_PREFIX the app
+// builds these frames from the same resolved placements instead of Aurora.
+// ─────────────────────────────────────────────────────────────────────────────
+export const LOCAL_BOARD_NAME_PREFIX = '攀岩板';
+
+export const isLocalBoardName = (name?: string): boolean =>
+  !!name && name.trim().startsWith(LOCAL_BOARD_NAME_PREFIX);
+
+let localBoardMode = false;
+
+export const setLocalBoardMode = (enabled: boolean): void => {
+  localBoardMode = enabled;
+};
+
+export const isLocalBoardMode = (): boolean => localBoardMode;
+
+const LOCAL_CMD = {
+  BRIGHT: 0x01,
+  CLEAR: 0x10,
+  ROLE_COLOR: 0x15,
+  ROLE_BIG: 0x16,
+} as const;
+
+// tb-board firmware role types (firmware/src/led_control.cpp):
+// 1 START(green) 2 RIGHT(blue) 6 END(red) 5 FOOT(cyan)
+const LOCAL_ROLE_TYPE: Record<string, number> = {
+  STARTING: 1,
+  HAND: 2,
+  FINISH: 6,
+  FOOT: 5,
+};
+
+const localFrame = (cmd: number, payload: number[]): number[] => {
+  const len = payload.length;
+  const out = [0xAA, (len >> 8) & 0xff, len & 0xff, cmd, ...payload];
+  let crc = 0;
+  for (const b of out) crc = (crc ^ b) & 0xff;
+  out.push(crc);
+  return out;
+};
+
+const buildLocalBluetoothPacket = (
+  frames: string,
+  placementPositions: LedPlacements,
+  boardName: AuroraBoardName,
+  colorOverrides?: LedColorOverrides,
+): BluetoothPacketResult => {
+  if (frames === '') {
+    return {
+      packet: Uint8Array.from(localFrame(LOCAL_CMD.CLEAR, [])),
+      skippedPositionCount: 0,
+      skippedRoleCount: 0,
+      totalPlacements: 0,
+      allLedsDark: false,
+      ledsWritten: 0,
+      ledsWithColour: 0,
+    };
+  }
+
+  const entries: Array<{ position: number; type: number; color: string }> = [];
+  let skippedPositionCount = 0;
+  let skippedRoleCount = 0;
+
+  frames.split('p').forEach((frame) => {
+    if (!frame) return;
+    const [placement, role] = frame.split('r');
+    const position = placementPositions[Number(placement)];
+    if (position === undefined) {
+      skippedPositionCount++;
+      return;
+    }
+    const state = HOLD_STATE_MAP[boardName]?.[Number(role)];
+    if (!state?.name) {
+      skippedRoleCount++;
+      return;
+    }
+    const type = LOCAL_ROLE_TYPE[state.name];
+    if (!type) {
+      skippedRoleCount++;
+      return;
+    }
+    const override = colorOverrides?.[state.name];
+    const source =
+      override && SIX_DIGIT_HEX_PATTERN.test(override) ? override : state.color;
+    entries.push({ position, type, color: source.replace('#', '') });
+  });
+
+  if (entries.length === 0) {
+    return {
+      packet: new Uint8Array(0),
+      skippedPositionCount,
+      skippedRoleCount,
+      totalPlacements: skippedPositionCount + skippedRoleCount,
+      allLedsDark: false,
+      ledsWritten: 0,
+      ledsWithColour: 0,
+    };
+  }
+
+  const out: number[] = [];
+  // Full brightness; the firmware stores this until the next 0x01.
+  out.push(...localFrame(LOCAL_CMD.BRIGHT, [255]));
+
+  // One 0x15 per role type present, using the board's own state colour.
+  const seenTypes = new Set<number>();
+  for (const entry of entries) {
+    if (seenTypes.has(entry.type)) continue;
+    seenTypes.add(entry.type);
+    out.push(
+      ...localFrame(LOCAL_CMD.ROLE_COLOR, [
+        entry.type,
+        parseInt(entry.color.slice(0, 2), 16),
+        parseInt(entry.color.slice(2, 4), 16),
+        parseInt(entry.color.slice(4, 6), 16),
+      ]),
+    );
+  }
+
+  // 0x16 role-big: u16 count + (role, idx_hi, idx_lo). 578 points = 1741 B,
+  // inside the firmware's 2048-byte frame buffer.
+  const payload: number[] = [(entries.length >> 8) & 0xff, entries.length & 0xff];
+  for (const entry of entries) {
+    payload.push(entry.type, (entry.position >> 8) & 0xff, entry.position & 0xff);
+  }
+  out.push(...localFrame(LOCAL_CMD.ROLE_BIG, payload));
+
+  return {
+    packet: Uint8Array.from(out),
+    skippedPositionCount,
+    skippedRoleCount,
+    totalPlacements: entries.length + skippedPositionCount + skippedRoleCount,
+    allLedsDark: false,
+    ledsWritten: entries.length,
+    ledsWithColour: entries.length,
+  };
+};
+
 /**
  * Build the BLE packet for a set of Aurora LED placements.
  *
@@ -254,6 +399,9 @@ export const getAuroraBluetoothPacket = (
   apiLevel: number = 3,
   colorOverrides?: LedColorOverrides,
 ): BluetoothPacketResult => {
+  if (localBoardMode) {
+    return buildLocalBluetoothPacket(frames, placementPositions, boardName, colorOverrides);
+  }
   const isV2 = apiLevel < 3;
   const cmds = isV2 ? V2_COMMANDS : V3_COMMANDS;
 
