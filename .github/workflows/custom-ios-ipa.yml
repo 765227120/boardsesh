@@ -19,7 +19,9 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-26
+    # macos-15 is the standard public runner; macos-26 queued indefinitely on
+    # this fork. Xcode 16.4 there still builds this Expo/RN app.
+    runs-on: macos-15
     timeout-minutes: 120
     env:
       CI: '1'
