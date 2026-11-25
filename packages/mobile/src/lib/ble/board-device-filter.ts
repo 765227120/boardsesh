@@ -68,6 +68,10 @@ export function isLikelyBoardDevice({
     return STRICT_AURORA_SERIAL_SUFFIX.test(name.trim()) && parseSerialNumber(name) !== undefined;
   }
 
+  // The tb-board advertises Nordic UART (below), but accept its name too so a
+  // scan result that drops the service-UUID list still offers the board.
+  if (isLocalBoardName(name)) return true;
+
   if (serviceUuids?.some((serviceUuid) => MOONBOARD_SERVICE_UUIDS.includes(serviceUuid.toLowerCase()))) {
     return true;
   }

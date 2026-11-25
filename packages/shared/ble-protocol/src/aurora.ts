@@ -252,8 +252,19 @@ export type BluetoothPacketResult = {
 // ─────────────────────────────────────────────────────────────────────────────
 export const LOCAL_BOARD_NAME_PREFIX = '攀岩板';
 
-export const isLocalBoardName = (name?: string): boolean =>
-  !!name && name.trim().startsWith(LOCAL_BOARD_NAME_PREFIX);
+// The tb-board advertises flags (3 B) + a 128-bit NUS UUID (18 B) + the name,
+// which leaves room for only 8 name bytes of the 12-byte "攀岩板-01". NimBLE
+// marks the name incomplete and cuts it mid-character, so a scan result can
+// arrive as "攀岩�" — the trailing 板 never makes it. Match the stable
+// leading 攀岩 as well as the full prefix so scan filtering and local-mode
+// detection see the same device whether or not the name was truncated.
+const LOCAL_BOARD_TRUNCATED_PREFIX = '攀岩';
+
+export const isLocalBoardName = (name?: string): boolean => {
+  if (!name) return false;
+  const trimmed = name.trim();
+  return trimmed.startsWith(LOCAL_BOARD_NAME_PREFIX) || trimmed.startsWith(LOCAL_BOARD_TRUNCATED_PREFIX);
+};
 
 let localBoardMode = false;
 
@@ -288,6 +299,51 @@ const localFrame = (cmd: number, payload: number[]): number[] => {
   return out;
 };
 
+/** A single tb-board LED: firmware Hold Index + tb-board role type. */
+export type LocalLedEntry = { index: number; type: number; color?: string };
+
+/**
+ * Build the tb-board command sequence for one climb:
+ *   0x01 brightness 255 → one 0x15 per role type that carries a colour →
+ *   a single 0x16 role-big frame.
+ * `clear` emits the 0x10 all-off frame instead (a blank climb is not the same
+ * request as "go dark" — the caller decides which one it means).
+ *
+ * Shared by the Aurora (Tension/Kilter) local path and the MoonBoard local path;
+ * the firmware parses the frames back-to-back from one BLE stream, so callers
+ * write the whole result in one go.
+ */
+export const buildLocalLedPacket = (entries: ReadonlyArray<LocalLedEntry>, clear = false): Uint8Array => {
+  if (clear) return Uint8Array.from(localFrame(LOCAL_CMD.CLEAR, []));
+
+  const out: number[] = localFrame(LOCAL_CMD.BRIGHT, [255]);
+
+  // One 0x15 per role type present, with the colour the entry carries.
+  const seenTypes = new Set<number>();
+  for (const entry of entries) {
+    if (!entry.color || seenTypes.has(entry.type)) continue;
+    seenTypes.add(entry.type);
+    out.push(
+      ...localFrame(LOCAL_CMD.ROLE_COLOR, [
+        entry.type,
+        parseInt(entry.color.slice(0, 2), 16),
+        parseInt(entry.color.slice(2, 4), 16),
+        parseInt(entry.color.slice(4, 6), 16),
+      ]),
+    );
+  }
+
+  // 0x16 role-big: u16 count + (role, idx_hi, idx_lo). 578 points = 1741 B,
+  // inside the firmware's 2048-byte frame buffer.
+  const payload: number[] = [(entries.length >> 8) & 0xff, entries.length & 0xff];
+  for (const entry of entries) {
+    payload.push(entry.type, (entry.index >> 8) & 0xff, entry.index & 0xff);
+  }
+  out.push(...localFrame(LOCAL_CMD.ROLE_BIG, payload));
+
+  return Uint8Array.from(out);
+};
+
 const buildLocalBluetoothPacket = (
   frames: string,
   placementPositions: LedPlacements,
@@ -296,7 +352,7 @@ const buildLocalBluetoothPacket = (
 ): BluetoothPacketResult => {
   if (frames === '') {
     return {
-      packet: Uint8Array.from(localFrame(LOCAL_CMD.CLEAR, [])),
+      packet: buildLocalLedPacket([], true),
       skippedPositionCount: 0,
       skippedRoleCount: 0,
       totalPlacements: 0,
@@ -306,7 +362,7 @@ const buildLocalBluetoothPacket = (
     };
   }
 
-  const entries: Array<{ position: number; type: number; color: string }> = [];
+  const entries: LocalLedEntry[] = [];
   let skippedPositionCount = 0;
   let skippedRoleCount = 0;
 
@@ -331,7 +387,7 @@ const buildLocalBluetoothPacket = (
     const override = colorOverrides?.[state.name];
     const source =
       override && SIX_DIGIT_HEX_PATTERN.test(override) ? override : state.color;
-    entries.push({ position, type, color: source.replace('#', '') });
+    entries.push({ index: position, type, color: source.replace('#', '') });
   });
 
   if (entries.length === 0) {
@@ -346,35 +402,8 @@ const buildLocalBluetoothPacket = (
     };
   }
 
-  const out: number[] = [];
-  // Full brightness; the firmware stores this until the next 0x01.
-  out.push(...localFrame(LOCAL_CMD.BRIGHT, [255]));
-
-  // One 0x15 per role type present, using the board's own state colour.
-  const seenTypes = new Set<number>();
-  for (const entry of entries) {
-    if (seenTypes.has(entry.type)) continue;
-    seenTypes.add(entry.type);
-    out.push(
-      ...localFrame(LOCAL_CMD.ROLE_COLOR, [
-        entry.type,
-        parseInt(entry.color.slice(0, 2), 16),
-        parseInt(entry.color.slice(2, 4), 16),
-        parseInt(entry.color.slice(4, 6), 16),
-      ]),
-    );
-  }
-
-  // 0x16 role-big: u16 count + (role, idx_hi, idx_lo). 578 points = 1741 B,
-  // inside the firmware's 2048-byte frame buffer.
-  const payload: number[] = [(entries.length >> 8) & 0xff, entries.length & 0xff];
-  for (const entry of entries) {
-    payload.push(entry.type, (entry.position >> 8) & 0xff, entry.position & 0xff);
-  }
-  out.push(...localFrame(LOCAL_CMD.ROLE_BIG, payload));
-
   return {
-    packet: Uint8Array.from(out),
+    packet: buildLocalLedPacket(entries),
     skippedPositionCount,
     skippedRoleCount,
     totalPlacements: entries.length + skippedPositionCount + skippedRoleCount,

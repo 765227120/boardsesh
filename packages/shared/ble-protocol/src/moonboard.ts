@@ -1,4 +1,5 @@
 import { MOONBOARD_GRID, MOONBOARD_DEVICE_NAME_PREFIXES } from '@boardsesh/board-constants/moonboard';
+import { buildLocalLedPacket, isLocalBoardMode } from './aurora';
 
 const MOONBOARD_FRAME_PREFIX = 'l#';
 const MOONBOARD_FRAME_SUFFIX = '#';
@@ -73,6 +74,87 @@ export function getMoonboardSerialPosition(holdId: number, numRows: number = MOO
   return colIndex * numRows + (numRows - 1 - rowIndex);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Local board mode — "攀岩板-xx" tb-board firmware
+//
+// Same module-level flag as the Aurora local path (./aurora). When set, a
+// MoonBoard climb is encoded as the tb-board's own 0x16 frame instead of the
+// `l#…#` ASCII frame. See aurora.ts for the wire format.
+//
+// Hold-id → tb-board Hold Index: tb-board's MoonBoard presets number holds
+// column-major with row 0 at the BOTTOM (Hold Index = col*ROWS + rowFromBottom),
+// and the mini program — the reference client for this hardware — vertically
+// flips that index before sending to compensate for the firmware's LED_MIRROR=3
+// (or the 11×12 offset branch). We mirror that exactly, so the same route lights
+// the same physical LEDs whether it is sent by the mini program or this app.
+const MOONBOARD_LOCAL_ROLE_TYPE: Record<number, number> = {
+  42: 1, // S → ROLE_START  (green)
+  43: 2, // P → ROLE_RIGHT  (blue)
+  44: 6, // E → ROLE_END    (red)
+};
+
+export function getLocalMoonboardHoldIndex(
+  holdId: number,
+  numRows: number = MOONBOARD_GRID.numRows,
+): number {
+  const maxHoldId = MOONBOARD_GRID.numColumns * numRows;
+  if (!Number.isInteger(holdId) || holdId < 1 || holdId > maxHoldId) {
+    throw new Error(`MoonBoard hold id out of range: ${holdId}`);
+  }
+  const zeroBasedHoldId = holdId - 1;
+  const colIndex = zeroBasedHoldId % MOONBOARD_GRID.numColumns;
+  const rowFromBottom = Math.floor(zeroBasedHoldId / MOONBOARD_GRID.numColumns);
+  return colIndex * numRows + (numRows - 1 - rowFromBottom);
+}
+
+function getLocalMoonboardPacket(frames: string, numRows: number): MoonboardPacketResult {
+  if (frames === '') {
+    return {
+      packet: buildLocalLedPacket([], true),
+      skippedRoleCount: 0,
+      skippedPositionCount: 0,
+      totalPlacements: 0,
+      isClear: true,
+    };
+  }
+
+  const entries: Array<{ index: number; type: number }> = [];
+  let skippedRoleCount = 0;
+  let skippedPositionCount = 0;
+
+  const frameParts = frames.split('p').filter(Boolean);
+  frameParts.forEach((frame) => {
+    const [placement, role] = frame.split('r');
+    const type = MOONBOARD_LOCAL_ROLE_TYPE[Number(role)];
+    if (!type) {
+      skippedRoleCount++;
+      return;
+    }
+    try {
+      entries.push({ index: getLocalMoonboardHoldIndex(Number(placement), numRows), type });
+    } catch {
+      skippedPositionCount++;
+    }
+  });
+
+  if (skippedPositionCount > 0) {
+    console.warn(`[BLE] Skipped ${skippedPositionCount} MoonBoard holds with invalid ids for this payload`);
+  }
+
+  // No 0x15 colour frames: the firmware's default role colours (green start,
+  // blue hand, red finish) are already the MoonBoard palette. An unencodable
+  // non-clear climb leaves the packet empty so the caller can refuse the send.
+  const packet = entries.length > 0 ? buildLocalLedPacket(entries) : new Uint8Array(0);
+
+  return {
+    packet,
+    skippedRoleCount,
+    skippedPositionCount,
+    totalPlacements: frameParts.length,
+    isClear: false,
+  };
+}
+
 export type MoonboardPacketOptions = {
   /**
    * MoonBoard "V2" feature: prefix the frame with `~D`, asking the firmware to
@@ -89,6 +171,12 @@ export function getMoonboardBluetoothPacket(
   numRows: number = MOONBOARD_GRID.numRows,
   options: MoonboardPacketOptions = {},
 ): MoonboardPacketResult {
+  // On a tb-board ("攀岩板-xx") the firmware speaks its own NUS protocol, not
+  // the MoonBoard ASCII frame — encode for that instead.
+  if (isLocalBoardMode()) {
+    return getLocalMoonboardPacket(frames, numRows);
+  }
+
   const encodedHolds: string[] = [];
   let skippedRoleCount = 0;
   let skippedPositionCount = 0;
