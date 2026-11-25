@@ -12,9 +12,10 @@ import {
   type LedColorOverrides,
 } from '@boardsesh/ble-protocol/aurora';
 import { parseAnyBoardTypeFromDeviceName } from '@boardsesh/ble-protocol';
-import { getMoonboardBluetoothPacket } from '@boardsesh/ble-protocol/moonboard';
+import { getMoonboardBluetoothPacket, isMoonboardDeviceName } from '@boardsesh/ble-protocol/moonboard';
 import {
   getWoodsBluetoothPacket,
+  isWoodsDeviceName,
   WoodsMultiFrameError,
   type WoodsBoardSize,
   type WoodsPacketResult,
@@ -362,13 +363,25 @@ function adapterOptionsForBoard(boardName: string): BleAdapterOptions {
   return { preferWriteWithResponse: boardName === 'woods', boardName };
 }
 
+// The tb-board ("攀岩板-xx") is the box this fork exists to drive. It is
+// identified by its advertised name, but iOS can drop a truncated/incomplete
+// BLE local name entirely (the firmware's 12-byte name is cut to 8 bytes beside
+// the 128-bit NUS UUID), and an Android scan can hand us the same cut. So a
+// connected device whose name identifies no official board is also treated as
+// the local box: this fork's picker is only used with the tb-board.
+function isLocalBoardConnection(deviceName: string | undefined): boolean {
+  if (isLocalBoardName(deviceName)) return true;
+  if (deviceName && (isMoonboardDeviceName(deviceName) || isWoodsDeviceName(deviceName))) return false;
+  return parseAnyBoardTypeFromDeviceName(deviceName) === undefined;
+}
+
 // A serial-less Kilter-built box (`Kilter Board`, `isKilterBuiltBox`) of the
 // board in view. It advertises no serial, so it is remembered by its BLE device
 // id, as a MoonBoard is. A bare name of another board type is positively
 // another board and is never remembered for this one.
 function isSerialLessBoxOfBoard(deviceName: string | undefined, boardName: string): boolean {
   // The tb-board ("攀岩板-xx") is a serial-less, board-name-less NUS controller.
-  if (isLocalBoardName(deviceName)) return true;
+  if (isLocalBoardConnection(deviceName)) return true;
   return isKilterBuiltBox(deviceName) && parseAnyBoardTypeFromDeviceName(deviceName) === boardName;
 }
 
@@ -2064,7 +2077,7 @@ export function useBoardBluetooth({
         apiLevelRef.current = parseApiLevel(connection.deviceName);
         configuredDeviceNameRef.current = connection.deviceName;
         configuredDeviceIdRef.current = connection.deviceId;
-        setLocalBoardMode(isLocalBoardName(connection.deviceName));
+        setLocalBoardMode(isLocalBoardConnection(connection.deviceName));
 
         const connectionGeneration = nextConnectionGenerationRef.current + 1;
         nextConnectionGenerationRef.current = connectionGeneration;
@@ -2754,7 +2767,7 @@ export function useBoardBluetooth({
       apiLevelRef.current = parseApiLevel(deviceName);
       configuredDeviceNameRef.current = deviceName;
       configuredDeviceIdRef.current = deviceId;
-      setLocalBoardMode(isLocalBoardName(deviceName));
+      setLocalBoardMode(isLocalBoardConnection(deviceName));
       const connectionGeneration = nextConnectionGenerationRef.current + 1;
       nextConnectionGenerationRef.current = connectionGeneration;
       adapterRef.current = adapter;

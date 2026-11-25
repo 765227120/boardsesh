@@ -54,6 +54,13 @@ export function isLikelyBoardDevice({
 }): boolean {
   if (scanFamily === 'aurora') {
     if (isLocalBoardName(name)) return true;
+    // The tb-board advertises Nordic UART, not Aurora. iOS CoreBluetooth can
+    // drop the truncated local name from an advertisement; accept a nameless
+    // UART peripheral in this fork's Aurora scan rather than losing the box.
+    // A named UART peripheral still has to look like an Aurora board below.
+    if (!name && serviceUuids?.some((serviceUuid) => serviceUuid.toLowerCase() === UART_SERVICE_UUID_LOWER)) {
+      return true;
+    }
     // `undefined` serviceUuids only occur on old iOS binaries whose native scan
     // already filtered by the Aurora service UUID — the native side vouched for
     // the device, so trust it. RNBleAdapter always passes an array (possibly

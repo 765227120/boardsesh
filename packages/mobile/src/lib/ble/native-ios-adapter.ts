@@ -309,7 +309,10 @@ export class NativeIosBleAdapter implements BluetoothAdapter {
     try {
       const scanServiceUuids =
         this.scanFamily === 'aurora'
-          ? [AURORA_ADVERTISED_SERVICE_UUID]
+          ? // The tb-board speaks the firmware's NUS protocol and advertises
+            // Nordic UART instead of the Aurora service, so include UART in the
+            // Aurora scan too (the JS filter keeps non-board peripherals out).
+            [AURORA_ADVERTISED_SERVICE_UUID, UART_SERVICE_UUID]
           : supportsUnfilteredScan
             ? []
             : // MoonBoard spans two controller generations: newer boards
