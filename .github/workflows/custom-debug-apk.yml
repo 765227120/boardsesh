@@ -7,8 +7,10 @@ name: Custom APK (tb-board)
 # Signing uses a stable release keystore from repository secrets:
 #   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
 #   ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
-# Without them the build fails instead of silently falling back to the
-# per-runner debug key (which can never upgrade an installed release build).
+# The repo's own with-android-release-signing plugin wires the keystore into
+# android/app/build.gradle; this workflow only decodes the secret and exports
+# ANDROID_KEYSTORE_PATH for the Gradle step. Missing secrets fail the build
+# instead of silently falling back to the per-runner debug key.
 
 on:
   push:
@@ -80,53 +82,25 @@ jobs:
       - name: Decode release keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
           test -s "$RUNNER_TEMP/release.keystore" || {
             echo "ANDROID_KEYSTORE_BASE64 is missing or empty"; exit 1;
           }
+          keytool -list -keystore "$RUNNER_TEMP/release.keystore" \
+            -storepass "$ANDROID_KEYSTORE_PASSWORD" > /dev/null
+          echo "keystore decoded and password verified"
           ls -l "$RUNNER_TEMP/release.keystore"
 
-      - name: Patch signing config (prebuild regenerates build.gradle)
-        run: |
-          python3 - <<'PY'
-          import pathlib
-
-          p = pathlib.Path("packages/mobile/android/app/build.gradle")
-          s = p.read_text()
-
-          release_block = '''
-                  release {
-                      storeFile file(System.getenv("ANDROID_KEYSTORE_FILE"))
-                      storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
-                      keyAlias System.getenv("ANDROID_KEY_ALIAS")
-                      keyPassword System.getenv("ANDROID_KEY_PASSWORD")
-                  }
-          '''
-          if "signingConfigs.release" in s:
-              raise SystemExit("build.gradle already has a release signing config")
-
-          s = s.replace("    signingConfigs {\n",
-                        "    signingConfigs {\n" + release_block, 1)
-
-          # The Expo template signs both debug and release with the debug key.
-          # Replace only the second occurrence (inside buildTypes.release).
-          needle = "signingConfig signingConfigs.debug"
-          first = s.find(needle)
-          second = s.find(needle, first + 1)
-          if first == -1 or second == -1:
-              raise SystemExit("could not find the release signingConfig line")
-          s = s[:second] + "signingConfig signingConfigs.release" + s[second + len(needle):]
-
-          p.write_text(s)
-          print("signing config patched")
-          PY
-          grep -n -A6 "signingConfigs" packages/mobile/android/app/build.gradle
-
+      # packages/mobile/plugins/with-android-release-signing.js already injects
+      # a conditional `signingConfigs.release` that reads ANDROID_KEYSTORE_PATH
+      # (plus password/alias) from the environment and falls back to debug when
+      # the path is absent. We only have to decode the secret and export the vars.
       - name: Build release APK (arm64, release-signed)
         working-directory: packages/mobile/android
         env:
-          ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/release.keystore
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/release.keystore
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
